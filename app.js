@@ -2,11 +2,14 @@
 "use strict";
 
 const $ = s => document.querySelector(s);
-const VERSION = 1;
+const VERSION = 2;
 const KEY = "svuafin.v1";
 const PEOPLE = { stepan: "Степан", yulia: "Юлия" };
 const DEBT_TYPES = { credit: "Кредит", card: "Кредитка", mfo: "МФО", installment: "Рассрочка", mortgage: "Ипотека", loan: "Займ", other: "Другое" };
 const EXP_CATS = { rent: "Аренда", utilities: "Коммуналка", phone: "Связь и интернет", transport: "Транспорт", subs: "Подписки", food: "Продукты", other: "Другое" };
+const FREQS = { monthly: "Раз в месяц", weekly: "По дням недели", biweekly: "Раз в 2 недели", once: "Разово", dates: "Свои даты" };
+const WD = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+const WD_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
 const MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const MONTHS_SHORT = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
@@ -39,6 +42,16 @@ function dateIn(ym, day) { const [y, m] = ym.split("-").map(Number); return new 
 const monthTitle = ym => { const [y, m] = ym.split("-").map(Number); return `${MONTHS[m - 1]} ${y}`; };
 const monthShort = ym => MONTHS_SHORT[Number(ym.slice(5)) - 1];
 const dayLabel = d => `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`;
+const isoD = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseD = s => { const [y, m, d] = String(s).split("-").map(Number); return new Date(y, m - 1, d); };
+const validD = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+function freqLabel(d) {
+  if (d.freq === "weekly") return "по " + WD_ORDER.filter(w => (d.weekdays || []).includes(w)).map(w => WD[w]).join(", ");
+  if (d.freq === "biweekly") return "раз в 2 недели";
+  if (d.freq === "once") return "разово";
+  if (d.freq === "dates") return `${(d.rows || []).length} ${plural((d.rows || []).length, "дата", "даты", "дат")}`;
+  return `${d.day} числа`;
+}
 const sameDay = (a, b) => a.getTime() === b.getTime();
 const rub = n => (Math.round(n) || 0).toLocaleString("ru-RU") + " ₽";
 const rubSigned = n => (n > 0 ? "+" : n < 0 ? "−" : "") + rub(Math.abs(n));
@@ -49,19 +62,39 @@ const parseMoney = v => { const n = Number(String(v).replace(/\s/g, "").replace(
 // Экземпляр платежа: { key, item, kind, ym, date, amount, paid, paidAmount }
 function debtSchedule(d) {
   const out = [];
+  const inst = (key, date, base, cap) => {
+    const p = D.paid[key];
+    const planned = D.over[key] ?? base;
+    const amount = p ? p.amount : (cap == null ? planned : Math.min(planned, cap));
+    return { key, item: d, kind: "debt", ym: ymOf(date), date, base, amount, paid: !!p };
+  };
   if (d.freq === "once") {
-    const key = d.id + "|" + d.start; const p = D.paid[key];
-    out.push({ key, item: d, kind: "debt", ym: d.start, date: dateIn(d.start, d.day), amount: p ? p.amount : d.total, paid: !!p });
+    out.push(inst(d.id + "|" + d.start, dateIn(d.start, d.day), d.total));
     return out;
   }
-  let cum = 0, ym = d.start;
+  if (d.freq === "dates") {
+    return (d.rows || []).filter(r => validD(r.date)).slice().sort((a, b) => (a.date < b.date ? -1 : 1))
+      .map(r => inst(d.id + "|" + r.date, parseD(r.date), Number(r.amount) || 0));
+  }
+  let cum = 0;
+  if (d.freq === "weekly" || d.freq === "biweekly") {
+    if (!validD(d.startDate)) return out;
+    const start = parseD(d.startDate), wds = new Set(d.weekdays || []);
+    if (d.freq === "weekly" && !wds.size) return out;
+    for (let i = 0, dt = new Date(start); i < 3700 && cum < d.total - 0.5; i++, dt.setDate(dt.getDate() + 1)) {
+      const hit = d.freq === "weekly" ? wds.has(dt.getDay()) : Math.round((dt - start) / 864e5) % 14 === 0;
+      if (!hit) continue;
+      const date = new Date(dt); const x = inst(d.id + "|" + isoD(date), date, d.payment, d.total - cum);
+      if (!x.paid && x.amount <= 0) break;
+      cum += x.amount; out.push(x);
+    }
+    return out;
+  }
+  let ym = d.start;
   for (let i = 0; i < 600 && cum < d.total - 0.5; i++, ym = addM(ym, 1)) {
-    const key = d.id + "|" + ym; const p = D.paid[key];
-    const planned = D.over[key] ?? d.payment;
-    const amount = p ? p.amount : Math.min(planned, d.total - cum);
-    if (!p && amount <= 0) break;
-    cum += amount;
-    out.push({ key, item: d, kind: "debt", ym, date: dateIn(ym, d.day), amount, paid: !!p });
+    const x = inst(d.id + "|" + ym, dateIn(ym, d.day), d.payment, d.total - cum);
+    if (!x.paid && x.amount <= 0) break;
+    cum += x.amount; out.push(x);
   }
   return out;
 }
@@ -307,7 +340,7 @@ function renderList() {
     return `<button class="debt-card" data-act="edit" data-id="${d.id}">
       <div class="line1"><b>${esc(d.name)}</b><span class="num" style="font-weight:800;color:${left > 0.5 ? "var(--coral)" : "var(--mint)"}">${left > 0.5 ? rub(left) : "Закрыт"}</span></div>
       <div class="bar"><i style="width:${pct}%"></i></div>
-      <div class="line2"><span>${DEBT_TYPES[d.type]} · ${PEOPLE[d.person]}${d.floating ? " · плавающий" : ""}</span><span class="num">${nx ? `${dayLabel(nx.date)} — ${rub(nx.amount)}` : "выплачен"}</span></div></button>`;
+      <div class="line2"><span>${DEBT_TYPES[d.type]} · ${PEOPLE[d.person]}${d.freq && d.freq !== "monthly" ? " · " + freqLabel(d) : ""}${d.floating ? " · плавающий" : ""}</span><span class="num">${nx ? `${dayLabel(nx.date)} — ${rub(nx.amount)}` : "выплачен"}</span></div></button>`;
   }).join("") : `<p class="muted small" style="margin:0">Пока нет. Нажмите «+».</p>`}</div>`;
   html += `<div class="card"><h2>Регулярные расходы <span class="right num">${rub(es.reduce((s, e) => s + e.amount, 0))}/мес</span></h2>${es.length ? `<div class="list">${es.map(e => `<button class="item" data-act="edit" data-id="${e.id}">
       <span class="ico expense">${(EXP_CATS[e.cat] || "").slice(0, 2)}</span><span class="mid"><b>${esc(e.name)}</b><small>${e.day} числа · ${EXP_CATS[e.cat]} ${personChip(e.person)}${e.floating ? ` <span class="chip float">плавающий</span>` : ""}</small></span>
@@ -357,12 +390,24 @@ function drawForm(errors = {}) {
   if (kind === "debt") {
     h += `<div class="field"><label for="f-name">Банк или кредитор</label><input id="f-name" data-f="name" value="${esc(v.name)}" placeholder="Сбербанк, Т-Банк, Займер…" autocomplete="off">${err("name")}</div>
       <div class="field"><span class="lbl">Тип</span>${chips("type", DEBT_TYPES, v.type)}</div>
-      <label class="toggle"><span>Разовый платёж<small>Например, МФО: всю сумму вернуть в один день</small></span><input type="checkbox" data-f="once" ${v.freq === "once" ? "checked" : ""}></label>
-      <div class="field"><label for="f-total">${v.freq === "once" ? "Сумма к возврату" : "Осталось выплатить всего"}, ₽</label><input id="f-total" data-f="total" inputmode="decimal" value="${v.total}" placeholder="150 000">${err("total")}</div>`;
-    if (v.freq !== "once") h += `<div class="field"><label for="f-pay">Платёж в месяц, ₽</label><input id="f-pay" data-f="payment" inputmode="decimal" value="${v.payment}" placeholder="8 500">${err("payment")}</div>
-      <label class="toggle"><span>Плавающий платёж<small>Сумма каждый месяц разная — укажите примерную, точную поправите в графике</small></span><input type="checkbox" data-f="floating" ${v.floating ? "checked" : ""}></label>`;
-    h += `<div class="row2"><div class="field"><label for="f-day">День платежа</label><input id="f-day" data-f="day" inputmode="numeric" value="${v.day}" placeholder="15">${err("day")}</div>
-      <div class="field"><label for="f-start">${v.freq === "once" ? "Месяц" : "Первый платёж"}</label><input id="f-start" type="month" data-f="start" value="${v.start}">${err("start")}</div></div>`;
+      <div class="field"><span class="lbl">Как платится</span>${chips("freq", FREQS, v.freq)}</div>`;
+    const f = v.freq;
+    if ((f === "weekly" || f === "biweekly") && !v.startDate) v.startDate = isoD(new Date());
+    if (f !== "dates") h += `<div class="field"><label for="f-total">${f === "once" ? "Сумма к возврату" : "Осталось выплатить всего"}, ₽</label><input id="f-total" data-f="total" inputmode="decimal" value="${v.total}" placeholder="150 000">${err("total")}</div>`;
+    if (f === "monthly" || f === "weekly" || f === "biweekly") h += `<div class="field"><label for="f-pay">${f === "monthly" ? "Платёж в месяц" : "Сумма одного платежа"}, ₽</label><input id="f-pay" data-f="payment" inputmode="decimal" value="${v.payment}" placeholder="${f === "monthly" ? "8 500" : "2 000"}">${err("payment")}</div>
+      <label class="toggle"><span>Плавающий платёж<small>Сумма каждый раз разная — укажите примерную, точную поправите в графике</small></span><input type="checkbox" data-f="floating" ${v.floating ? "checked" : ""}></label>`;
+    if (f === "monthly" || f === "once") h += `<div class="row2"><div class="field"><label for="f-day">День платежа</label><input id="f-day" data-f="day" inputmode="numeric" value="${v.day}" placeholder="15">${err("day")}</div>
+      <div class="field"><label for="f-start">${f === "once" ? "Месяц" : "Первый платёж"}</label><input id="f-start" type="month" data-f="start" value="${v.start}">${err("start")}</div></div>`;
+    if (f === "weekly") h += `<div class="field"><span class="lbl">В какие дни недели</span><div class="chips" data-multi="weekdays">${WD_ORDER.map(w => `<button type="button" data-v="${w}" class="${(v.weekdays || []).includes(w) ? "on" : ""}">${WD[w]}</button>`).join("")}</div>${err("weekdays")}<span class="hint">Например, вторник и пятница — платёж два раза в неделю.</span></div>`;
+    if (f === "weekly" || f === "biweekly") h += `<div class="field"><label for="f-sd">${f === "weekly" ? "Начиная с даты" : "Дата первого платежа"}</label><input id="f-sd" type="date" data-f="startDate" value="${v.startDate || ""}">${err("startDate")}</div>`;
+    if (f === "dates") {
+      const rows = v.rows && v.rows.length ? v.rows : [{ date: "", amount: "" }];
+      const sum = rows.reduce((a, r) => a + (parseMoney(r.amount) || 0), 0);
+      h += `<div class="field"><span class="lbl">Даты и суммы платежей</span>
+        <div class="sched">${rows.map((r, i) => `<div class="date-row"><input type="date" data-rf="date" data-i="${i}" value="${r.date || ""}"><input inputmode="decimal" data-rf="amount" data-i="${i}" value="${r.amount ?? ""}" placeholder="сумма"><button type="button" class="ok" data-act="row-del" data-i="${i}" aria-label="Убрать дату">✕</button></div>`).join("")}</div>
+        <button type="button" class="btn" data-act="row-add">+ Добавить дату</button>${err("rows")}
+        <span class="hint">Всего по датам: ${rub(sum)}. Это и будет сумма долга.</span></div>`;
+    }
   } else if (kind === "expense") {
     h += `<div class="field"><label for="f-name">Название</label><input id="f-name" data-f="name" value="${esc(v.name)}" placeholder="Аренда квартиры" autocomplete="off">${err("name")}</div>
       <div class="field"><span class="lbl">Категория</span>${chips("cat", EXP_CATS, v.cat)}</div>
@@ -388,23 +433,44 @@ function drawForm(errors = {}) {
 function readForm() {
   document.querySelectorAll("#sheet-body [data-f]").forEach(el => {
     const f = el.dataset.f;
-    if (f === "once") FORM.v.freq = el.checked ? "once" : "monthly";
-    else if (el.type === "checkbox") FORM.v[f] = el.checked;
+    if (el.type === "checkbox") FORM.v[f] = el.checked;
     else FORM.v[f] = el.value;
   });
+  const rowEls = document.querySelectorAll("#sheet-body [data-rf]");
+  if (rowEls.length) {
+    const rows = [];
+    rowEls.forEach(el => { const i = Number(el.dataset.i); rows[i] = rows[i] || { date: "", amount: "" }; rows[i][el.dataset.rf] = el.value; });
+    FORM.v.rows = rows.filter(Boolean);
+  }
 }
 function saveForm() {
   readForm();
   const { kind, id, v } = FORM; const e = {};
   const out = { id: id || uid(), person: v.person, name: String(v.name).trim() };
   if (!out.name) e.name = "Укажите название";
-  const day = Number(v.day); if (!(day >= 1 && day <= 31)) e.day = "Число от 1 до 31"; out.day = day;
+  const day = Number(v.day); out.day = day;
+  const needDay = kind !== "debt" || v.freq === "monthly" || v.freq === "once";
+  if (needDay && !(day >= 1 && day <= 31)) e.day = "Число от 1 до 31";
   if (kind === "debt") {
-    Object.assign(out, { type: v.type, freq: v.freq === "once" ? "once" : "monthly", floating: v.freq !== "once" && !!v.floating, start: v.start });
-    out.total = parseMoney(v.total); if (!(out.total > 0)) e.total = "Введите сумму больше нуля";
-    if (out.freq === "monthly") { out.payment = parseMoney(v.payment); if (!(out.payment > 0)) e.payment = "Введите сумму платежа"; }
-    else out.payment = out.total;
-    if (!/^\d{4}-\d{2}$/.test(out.start || "")) e.start = "Выберите месяц";
+    const f = FREQS[v.freq] ? v.freq : "monthly";
+    Object.assign(out, { type: v.type, freq: f, floating: (f === "monthly" || f === "weekly" || f === "biweekly") && !!v.floating, start: v.start });
+    if (f !== "dates") { out.total = parseMoney(v.total); if (!(out.total > 0)) e.total = "Введите сумму больше нуля"; }
+    if (f === "monthly" || f === "weekly" || f === "biweekly") { out.payment = parseMoney(v.payment); if (!(out.payment > 0)) e.payment = "Введите сумму платежа"; }
+    if (f === "monthly" || f === "once") { if (!/^\d{4}-\d{2}$/.test(out.start || "")) e.start = "Выберите месяц"; if (f === "once") out.payment = out.total; }
+    if (f === "weekly" || f === "biweekly") {
+      out.startDate = v.startDate;
+      if (!validD(out.startDate)) e.startDate = "Выберите дату";
+      else { const sd = parseD(out.startDate); out.day = sd.getDate(); out.start = ymOf(sd); }
+      if (f === "weekly") { out.weekdays = (v.weekdays || []).map(Number); if (!out.weekdays.length) e.weekdays = "Отметьте хотя бы один день"; }
+    }
+    if (f === "dates") {
+      const rows = (v.rows || []).filter(r => r.date || r.amount);
+      const bad = rows.some(r => !validD(r.date) || !(parseMoney(r.amount) > 0));
+      if (!rows.length) e.rows = "Добавьте хотя бы одну дату"; else if (bad) e.rows = "У каждой строки нужны дата и сумма";
+      out.rows = rows.map(r => ({ date: r.date, amount: parseMoney(r.amount) })).sort((a, b) => (a.date < b.date ? -1 : 1));
+      out.total = out.rows.reduce((a, r) => a + (r.amount || 0), 0);
+      if (out.rows[0] && validD(out.rows[0].date)) { const fd = parseD(out.rows[0].date); out.day = fd.getDate(); out.start = ymOf(fd); out.payment = out.rows[0].amount; }
+    }
   } else {
     out.amount = parseMoney(v.amount); if (!(out.amount > 0)) e.amount = "Введите сумму больше нуля";
     if (kind === "expense") { out.cat = v.cat; out.floating = !!v.floating; out.start = v.start || (id ? findItem(id).start : TODAY_YM()); }
@@ -426,13 +492,16 @@ function deleteItem(id) {
 }
 const checkSvg = `<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></svg>`;
 function scheduleEditor(d) {
-  const s = debtSchedule(d); if (!s.length) return "";
+  const all = debtSchedule(d); if (!all.length) return "";
   const left = debtLeft(d);
+  const paid = all.filter(x => x.paid), open = all.filter(x => !x.paid);
+  const s = [...paid.slice(-3), ...open.slice(0, 40)], more = open.length - 40;
+  const label = x => d.freq === "monthly" ? `${monthTitle(x.ym)}<br><small class="muted">${dayLabel(x.date)}</small>` : `${dayLabel(x.date)}<br><small class="muted">${WD[x.date.getDay()]}, ${x.date.getFullYear()}</small>`;
   return `<div class="field"><span class="lbl">График платежей · осталось ${rub(left)}</span>
-    <span class="hint">Поменяйте сумму месяца, если платёж плавающий. Галочка — платёж внесён.</span>
-    <div class="sched">${s.map(x => `<div class="sched-row ${x.paid ? "paid" : ""}"><span>${monthTitle(x.ym)}<br><small class="muted">${dayLabel(x.date)}</small></span>
+    <span class="hint">Поменяйте сумму, если платёж плавающий. Галочка — платёж внесён.</span>
+    <div class="sched">${s.map(x => `<div class="sched-row ${x.paid ? "paid" : ""}"><span>${label(x)}</span>
       <input inputmode="decimal" data-sched="${x.key}" value="${Math.round(x.amount)}" ${x.paid ? "disabled" : ""}>
-      <button class="ok ${x.paid ? "on" : ""}" data-act="toggle-paid" data-key="${x.key}" aria-label="Оплачено">${checkSvg}</button></div>`).join("")}</div></div>`;
+      <button class="ok ${x.paid ? "on" : ""}" data-act="toggle-paid" data-key="${x.key}" aria-label="Оплачено">${checkSvg}</button></div>`).join("")}</div>${more > 0 ? `<span class="hint">И ещё ${more} ${plural(more, "платёж", "платежа", "платежей")} дальше.</span>` : ""}</div>`;
 }
 function monthsEditor(it, kind) {
   const from = TODAY_YM(); const s = recurring(it, kind, addM(from, -1), addM(from, 5));
@@ -466,7 +535,7 @@ function openPay(key) {
 function setAmount(key, val) {
   const x = findInstance(key); if (!x) return false;
   const n = parseMoney(val); if (!(n >= 0)) { toast("Введите сумму числом"); return false; }
-  const base = x.kind === "debt" ? x.item.payment : x.item.amount;
+  const base = x.base ?? (x.kind === "debt" ? x.item.payment : x.item.amount);
   if (Math.round(n) === Math.round(base)) delete D.over[key]; else D.over[key] = n;
   return true;
 }
@@ -572,10 +641,10 @@ function claudeReport() {
   L.push(row(["Из них ещё не оплачено", ...M.map(x => rub(x.leftToPay))]));
   L.push(row(["Свободно в этом месяце", ...M.map(x => rubSigned(x.free))]), "");
 
-  L.push("## Долги", "", row(["Чей", "Кредитор", "Тип", "Осталось", "Внесено в приложении как долг", "Платёж/мес", "День", "Плавающий", "Следующий платёж", "Последний платёж"]), row(Array(10).fill("---")));
+  L.push("## Долги", "", row(["Чей", "Кредитор", "Тип", "Осталось", "Внесено в приложении как долг", "Платёж", "Когда платится", "Плавающий", "Следующий платёж", "Последний платёж"]), row(Array(10).fill("---")));
   for (const d of D.debts) {
     const nx = debtNext(d);
-    L.push(row([PEOPLE[d.person], d.name, DEBT_TYPES[d.type], rub(debtLeft(d)), rub(d.total), d.freq === "once" ? "разовый" : rub(d.payment), String(d.day), d.floating ? "да" : "нет",
+    L.push(row([PEOPLE[d.person], d.name, DEBT_TYPES[d.type], rub(debtLeft(d)), rub(d.total), d.freq === "once" || d.freq === "dates" ? "—" : rub(d.payment) + (d.freq === "monthly" ? "" : " за платёж"), freqLabel(d), d.floating ? "да" : "нет",
       nx ? `${nx.date.toLocaleDateString("ru-RU")} — ${rub(nx.amount)}` : "выплачен", debtEnd(d) ? monthTitle(debtEnd(d)) : "—"]));
   }
   L.push("", "### Графики по долгам (неоплаченные платежи)", "");
@@ -638,6 +707,8 @@ document.addEventListener("click", e => {
   if (e.target.id === "sheet") { closeSheet(); return; }
   const seg = e.target.closest("[data-act-seg] button");
   if (seg) { readForm(); openForm(seg.dataset.kind); return; }
+  const mchip = e.target.closest(".chips[data-multi] button");
+  if (mchip) { readForm(); const f = mchip.parentElement.dataset.multi, val = Number(mchip.dataset.v); const set = new Set(FORM.v[f] || []); set.has(val) ? set.delete(val) : set.add(val); FORM.v[f] = [...set]; drawForm(); return; }
   const chip = e.target.closest(".chips[data-field] button");
   if (chip) { readForm(); FORM.v[chip.parentElement.dataset.field] = chip.dataset.v; drawForm(); return; }
   const qn = e.target.closest("[data-quick-name] button");
@@ -651,6 +722,8 @@ document.addEventListener("click", e => {
   else if (a === "add") openForm(el.dataset.kind || "debt");
   else if (a === "edit") openForm(null, el.dataset.id);
   else if (a === "form-save") saveForm();
+  else if (a === "row-add") { readForm(); FORM.v.rows = [...(FORM.v.rows || []), { date: "", amount: (FORM.v.rows || []).slice(-1)[0]?.amount || "" }]; drawForm(); }
+  else if (a === "row-del") { readForm(); FORM.v.rows = (FORM.v.rows || []).filter((_, i) => i !== Number(el.dataset.i)); drawForm(); }
   else if (a === "form-delete") $("#del-confirm").hidden = false;
   else if (a === "del-no") $("#del-confirm").hidden = true;
   else if (a === "del-yes") deleteItem(FORM.id);
@@ -679,7 +752,6 @@ document.addEventListener("click", e => {
 });
 // Сумма месяца в графике — сохраняется при выходе из поля.
 document.addEventListener("change", e => {
-  if (e.target.dataset?.f === "once") { readForm(); drawForm(); return; }
   const k = e.target.dataset?.sched; if (!k) return;
   if (setAmount(k, e.target.value)) { save(); readForm(); drawForm(); render(); }
 });
