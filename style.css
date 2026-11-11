@@ -208,3 +208,5 @@ main { min-height: 0; position: relative; }
 .date-row { display: grid; grid-template-columns: 1fr 104px 34px; gap: 8px; align-items: center; padding: 5px 0; }
 .date-row input { min-width: 0; padding: 9px 10px !important; font-size: 15px !important; }
 .date-row .ok { width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+
+.btn.early { border-color: rgb(252 209 116 / .45); color: var(--gold); background: rgb(252 209 116 / .08); }

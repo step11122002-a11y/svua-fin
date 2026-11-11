@@ -2,7 +2,7 @@
 "use strict";
 
 const $ = s => document.querySelector(s);
-const VERSION = 3;
+const VERSION = 4;
 const KEY = "svuafin.v1";
 const PEOPLE = { stepan: "Степан", yulia: "Юлия" };
 const DEBT_TYPES = { credit: "Кредит", card: "Кредитка", mfo: "МФО", installment: "Рассрочка", mortgage: "Ипотека", loan: "Займ", other: "Другое" };
@@ -61,43 +61,55 @@ const parseMoney = v => { const n = Number(String(v).replace(/\s/g, "").replace(
 
 // ---------- Расписание платежей ----------
 // Экземпляр платежа: { key, item, kind, ym, date, amount, paid, paidAmount }
+// Досрочные платежи хранятся в d.extra = [{id, date, amount, full}], полное закрытие — d.closed = {date, amount, left}.
+// Старые данные без этих полей работают как раньше.
+const debtExtras = d => (Array.isArray(d.extra) ? d.extra : []).filter(e => validD(e.date) && e.amount > 0);
 function debtSchedule(d) {
-  const out = [];
+  let out = [];
+  const extras = debtExtras(d);
+  const T = d.closed ? 0 : Math.max(0, d.total - extras.reduce((a, e) => a + e.amount, 0)); // сколько осталось по обычному графику
   const inst = (key, date, base, cap) => {
     const p = D.paid[key];
     const planned = D.over[key] ?? base;
     const amount = p ? p.amount : (cap == null ? planned : Math.min(planned, cap));
     return { key, item: d, kind: "debt", ym: ymOf(date), date, base, amount, paid: !!p };
   };
-  if (d.freq === "once") {
-    out.push(inst(d.id + "|" + d.start, dateIn(d.start, d.day), d.total));
-    return out;
-  }
-  if (d.freq === "dates") {
-    return (d.rows || []).filter(r => validD(r.date)).slice().sort((a, b) => (a.date < b.date ? -1 : 1))
-      .map(r => inst(d.id + "|" + r.date, parseD(r.date), Number(r.amount) || 0));
-  }
   let cum = 0;
-  if (d.freq === "weekly" || d.freq === "biweekly") {
-    if (!validD(d.startDate)) return out;
-    const start = parseD(d.startDate), wds = new Set(d.weekdays || []);
-    if (d.freq === "weekly" && !wds.size) return out;
-    for (let i = 0, dt = new Date(start); i < 3700 && cum < d.total - 0.5; i++, dt.setDate(dt.getDate() + 1)) {
-      const hit = d.freq === "weekly" ? wds.has(dt.getDay()) : Math.round((dt - start) / 864e5) % 14 === 0;
-      if (!hit) continue;
-      const date = new Date(dt); const x = inst(d.id + "|" + isoD(date), date, d.payment, d.total - cum);
+  if (d.freq === "once") {
+    const x = inst(d.id + "|" + d.start, dateIn(d.start, d.day), d.total, T);
+    if (x.paid || x.amount > 0.5) out.push(x);
+  } else if (d.freq === "dates") {
+    for (const r of (d.rows || []).filter(r => validD(r.date)).slice().sort((a, b) => (a.date < b.date ? -1 : 1))) {
+      const x = inst(d.id + "|" + r.date, parseD(r.date), Number(r.amount) || 0, Math.max(0, T - cum));
+      if (!x.paid && x.amount <= 0.5) continue;
+      cum += x.amount; out.push(x);
+    }
+  } else if (d.freq === "weekly" || d.freq === "biweekly") {
+    const wds = new Set(d.weekdays || []);
+    if (validD(d.startDate) && (d.freq === "biweekly" || wds.size)) {
+      const start = parseD(d.startDate);
+      for (let i = 0, dt = new Date(start); i < 3700 && cum < T - 0.5; i++, dt.setDate(dt.getDate() + 1)) {
+        const hit = d.freq === "weekly" ? wds.has(dt.getDay()) : Math.round((dt - start) / 864e5) % 14 === 0;
+        if (!hit) continue;
+        const date = new Date(dt); const x = inst(d.id + "|" + isoD(date), date, d.payment, T - cum);
+        if (!x.paid && x.amount <= 0) break;
+        cum += x.amount; out.push(x);
+      }
+    }
+  } else {
+    let ym = d.start;
+    for (let i = 0; i < 600 && cum < T - 0.5; i++, ym = addM(ym, 1)) {
+      const x = inst(d.id + "|" + ym, dateIn(ym, d.day), d.payment, T - cum);
       if (!x.paid && x.amount <= 0) break;
       cum += x.amount; out.push(x);
     }
-    return out;
   }
-  let ym = d.start;
-  for (let i = 0; i < 600 && cum < d.total - 0.5; i++, ym = addM(ym, 1)) {
-    const x = inst(d.id + "|" + ym, dateIn(ym, d.day), d.payment, d.total - cum);
-    if (!x.paid && x.amount <= 0) break;
-    cum += x.amount; out.push(x);
+  if (d.closed) out = out.filter(x => x.paid);
+  for (const e of extras) {
+    const date = parseD(e.date);
+    out.push({ key: d.id + "|x" + e.id, item: d, kind: "debt", ym: ymOf(date), date, base: e.amount, amount: e.amount, paid: true, extra: e });
   }
-  return out;
+  return out.sort((a, b) => a.date - b.date);
 }
 function recurring(item, kind, fromYM, toYM) {
   const out = [];
@@ -130,7 +142,7 @@ function events(fromYM, toYM, who = UI.who) {
   return ev.sort((a, b) => a.date - b.date || (a.kind === "income" ? -1 : 1));
 }
 const debtPaid = d => debtSchedule(d).filter(x => x.paid).reduce((s, x) => s + x.amount, 0);
-const debtLeft = d => Math.max(0, d.total - debtPaid(d));
+const debtLeft = d => (d.closed ? 0 : Math.max(0, d.total - debtPaid(d)));
 const debtNext = d => debtSchedule(d).find(x => !x.paid);
 const debtEnd = d => { const s = debtSchedule(d); return s.length ? s[s.length - 1].ym : null; };
 
@@ -180,7 +192,7 @@ const icoText = x => x.kind === "income" ? "₽" : x.kind === "debt" ? (DEBT_TYP
 function itemRow(x, { showDate = true } = {}) {
   const t = today0();
   const st = x.kind === "income" ? "" : x.paid ? `<span class="chip ok">оплачено</span>` : x.date < t ? `<span class="chip late">просрочен</span>` : sameDay(x.date, t) ? `<span class="chip today">сегодня</span>` : "";
-  const fl = x.item.floating && !x.paid ? `<span class="chip float">плавающий</span>` : "";
+  const fl = x.extra ? `<span class="chip float">досрочно</span>` : x.item.floating && !x.paid ? `<span class="chip float">плавающий</span>` : "";
   const sub = [showDate ? dayLabel(x.date) : "", x.kind === "debt" ? DEBT_TYPES[x.item.type] : x.kind === "expense" ? EXP_CATS[x.item.cat] : "доход"].filter(Boolean).join(" · ");
   return `<button class="item ${x.paid ? "paid" : ""}" data-act="pay" data-key="${x.key}">
     <span class="ico ${x.kind}">${icoText(x)}</span>
@@ -347,7 +359,7 @@ function renderList() {
   html += `<div class="card"><h2>Долги <span class="right num">${rub(ds.reduce((s, d) => s + debtLeft(d), 0))}</span></h2>${ds.length ? ds.map(d => {
     const left = debtLeft(d), pct = d.total ? Math.min(100, ((d.total - left) / d.total) * 100) : 0, nx = debtNext(d);
     return `<button class="debt-card" data-act="edit" data-id="${d.id}">
-      <div class="line1"><b>${esc(d.name)}</b><span class="num" style="font-weight:800;color:${left > 0.5 ? "var(--coral)" : "var(--mint)"}">${left > 0.5 ? rub(left) : "Закрыт"}</span></div>
+      <div class="line1"><b>${esc(d.name)}</b><span class="num" style="font-weight:800;color:${left > 0.5 ? "var(--coral)" : "var(--mint)"}">${left > 0.5 ? rub(left) : d.closed ? "Закрыт досрочно" : "Закрыт"}</span></div>
       <div class="bar"><i style="width:${pct}%"></i></div>
       <div class="line2"><span>${DEBT_TYPES[d.type]} · ${PEOPLE[d.person]}${d.freq && d.freq !== "monthly" ? " · " + freqLabel(d) : ""}${d.floating ? " · плавающий" : ""}</span><span class="num">${nx ? `${dayLabel(nx.date)} — ${rub(nx.amount)}` : "выплачен"}</span></div></button>`;
   }).join("") : `<p class="muted small" style="margin:0">Пока нет. Нажмите «+».</p>`}</div>`;
@@ -395,6 +407,13 @@ function drawForm(errors = {}) {
   const { kind, id, v } = FORM;
   const err = f => errors[f] ? `<span class="err">${errors[f]}</span>` : "";
   let h = `<h3>${id ? "Изменить" : "Добавить"}</h3>`;
+  if (id && kind === "debt") {
+    const d = findItem(id), nx = debtNext(d);
+    if (!d.closed) h += `<p class="muted" style="margin:-8px 0 0">Осталось <b class="num" style="color:var(--text)">${rub(debtLeft(d))}</b>${nx ? ` · следующий платёж ${dayLabel(nx.date)} — ${rub(nx.amount)}` : ""}</p>`;
+    if (d.closed) h += `<div class="confirm"><p>✅ Закрыт досрочно ${dayLabel(parseD(d.closed.date))} ${parseD(d.closed.date).getFullYear()}: внесено ${rub(d.closed.amount)}${d.closed.left > d.closed.amount ? `, экономия ${rub(d.closed.left - d.closed.amount)}` : ""}.</p>
+      <button class="btn danger" data-act="extra-undo" data-id="${id}" data-eid="${(debtExtras(d).find(z => z.full) || {}).id || ""}">Отменить закрытие</button></div>`;
+    else if (debtLeft(d) > 0.5) h += `<button class="btn full early" data-act="early" data-id="${id}">⚡ Погасить досрочно</button>`;
+  }
   if (!id) h += `<div class="seg" data-act-seg>${[["debt", "Долг"], ["expense", "Расход"], ["income", "Доход"]].map(([k, t]) => `<button type="button" data-kind="${k}" class="${kind === k ? "on" : ""}">${t}</button>`).join("")}</div>`;
   h += `<div class="field"><span class="lbl">Чей</span>${chips("person", PEOPLE, v.person, "people")}</div>`;
   if (kind === "debt") {
@@ -436,6 +455,7 @@ function drawForm(errors = {}) {
       ${once ? `<span class="hint" style="margin-top:-6px">Разовые деньги попадут в доход своего месяца и в раскладку «Зарплаты» — с них тоже можно платить.</span>` : ""}`;
   }
   h += `<button class="btn primary full" data-act="form-save">${id ? "Сохранить" : "Добавить"}</button>`;
+
   if (id) {
     if (kind === "debt") h += scheduleEditor(findItem(id));
     else if (findItem(id).floating) h += monthsEditor(findItem(id), kind);
@@ -519,12 +539,12 @@ function scheduleEditor(d) {
   const left = debtLeft(d);
   const paid = all.filter(x => x.paid), open = all.filter(x => !x.paid);
   const s = [...paid.slice(-3), ...open.slice(0, 40)], more = open.length - 40;
-  const label = x => d.freq === "monthly" ? `${monthTitle(x.ym)}<br><small class="muted">${dayLabel(x.date)}</small>` : `${dayLabel(x.date)}<br><small class="muted">${WD[x.date.getDay()]}, ${x.date.getFullYear()}</small>`;
+  const label = x => x.extra ? `${dayLabel(x.date)}<br><small style="color:var(--gold)">досрочно${x.extra.full ? ", закрытие" : ""}</small>` : d.freq === "monthly" ? `${monthTitle(x.ym)}<br><small class="muted">${dayLabel(x.date)}</small>` : `${dayLabel(x.date)}<br><small class="muted">${WD[x.date.getDay()]}, ${x.date.getFullYear()}</small>`;
   return `<div class="field"><span class="lbl">График платежей · осталось ${rub(left)}</span>
     <span class="hint">Поменяйте сумму, если платёж плавающий. Галочка — платёж внесён.</span>
     <div class="sched">${s.map(x => `<div class="sched-row ${x.paid ? "paid" : ""}"><span>${label(x)}</span>
       <input inputmode="decimal" data-sched="${x.key}" value="${Math.round(x.amount)}" ${x.paid ? "disabled" : ""}>
-      <button class="ok ${x.paid ? "on" : ""}" data-act="toggle-paid" data-key="${x.key}" aria-label="Оплачено">${checkSvg}</button></div>`).join("")}</div>${more > 0 ? `<span class="hint">И ещё ${more} ${plural(more, "платёж", "платежа", "платежей")} дальше.</span>` : ""}</div>`;
+      ${x.extra ? `<button class="ok on" data-act="pay" data-key="${x.key}" aria-label="Досрочный платёж">⚡</button>` : `<button class="ok ${x.paid ? "on" : ""}" data-act="toggle-paid" data-key="${x.key}" aria-label="Оплачено">${checkSvg}</button>`}</div>`).join("")}</div>${more > 0 ? `<span class="hint">И ещё ${more} ${plural(more, "платёж", "платежа", "платежей")} дальше.</span>` : ""}</div>`;
 }
 function monthsEditor(it, kind) {
   const from = TODAY_YM(); const s = recurring(it, kind, addM(from, -1), addM(from, 5));
@@ -544,6 +564,7 @@ function findInstance(key) {
 }
 function openPay(key) {
   const x = findInstance(key); if (!x) return;
+  if (x.extra) { openExtra(x); return; }
   const isInc = x.kind === "income";
   openSheet(`<h3>${esc(x.item.name)}</h3>
     <p class="muted" style="margin:-8px 0 0">${dayLabel(x.date)} · ${isInc ? "доход" : x.kind === "debt" ? DEBT_TYPES[x.item.type] : EXP_CATS[x.item.cat]} · ${PEOPLE[x.item.person]}</p>
@@ -553,8 +574,58 @@ function openPay(key) {
     ${isInc ? `<button class="btn primary full" data-act="amount-save" data-key="${key}">Сохранить сумму</button>`
       : x.paid ? `<button class="btn full" data-act="unpay" data-key="${key}">Отменить оплату</button>`
       : `<button class="btn primary full" data-act="mark-paid" data-key="${key}">Оплачено</button><button class="btn full" data-act="amount-save" data-key="${key}">Только изменить сумму</button>`}
-    <button class="btn full" data-act="edit" data-id="${x.item.id}">Открыть ${isInc ? "зарплату" : x.kind === "debt" ? "долг" : "расход"}</button>
+    ${x.kind === "debt" && !x.item.closed && debtLeft(x.item) > 0.5 ? `<button class="btn full early" data-act="early" data-id="${x.item.id}">⚡ Погасить досрочно</button>` : ""}
+    <button class="btn full" data-act="edit" data-id="${x.item.id}">Открыть ${isInc ? "доход" : x.kind === "debt" ? "долг" : "расход"}</button>
     <button class="btn full" data-act="close">Закрыть</button>`);
+}
+
+// ---------- Досрочное погашение ----------
+let EARLY = null;
+function openEarly(id, mode) {
+  const d = findItem(id); if (!d) return;
+  const left = debtLeft(d);
+  const prev = EARLY;
+  EARLY = { id, mode: mode || (prev && prev.id === id ? prev.mode : "full") };
+  const full = EARLY.mode === "full";
+  openSheet(`<h3>Досрочное погашение</h3>
+    <p class="muted" style="margin:-8px 0 0">${esc(d.name)} · ${PEOPLE[d.person]} · по графику осталось ${rub(left)}</p>
+    <div class="seg" data-early-mode><button type="button" data-mode="full" class="${full ? "on" : ""}">Полностью</button><button type="button" data-mode="part" class="${!full ? "on" : ""}">Частично</button></div>
+    <div class="field"><label for="e-amount">${full ? "Сколько внесли для закрытия" : "Сколько внесли досрочно"}, ₽</label>
+      <input id="e-amount" inputmode="decimal" value="${full ? Math.round(left) : ""}" placeholder="${full ? "" : "20 000"}">
+      <span class="hint">${full ? "Если банк пересчитал проценты и к закрытию вышло меньше — впишите фактическую сумму, приложение покажет экономию." : "Остаток уменьшится, график сократится с конца, ежемесячный платёж останется прежним. Если банк уменьшил платёж — поменяйте его в долге."}</span>
+      <span class="err" id="e-err"></span></div>
+    <div class="field"><label for="e-date">Дата</label><input id="e-date" type="date" value="${isoD(new Date())}"></div>
+    <button class="btn primary full" data-act="early-save">${full ? "Закрыть долг" : "Внести досрочно"}</button>
+    <button class="btn full" data-act="edit" data-id="${id}">Назад к долгу</button>`);
+}
+function saveEarly() {
+  const d = findItem(EARLY.id); if (!d) return;
+  const amount = parseMoney($("#e-amount").value), date = $("#e-date").value, left = debtLeft(d);
+  const fail = t => { $("#e-err").textContent = t; };
+  if (!(amount > 0)) return fail("Введите сумму больше нуля");
+  if (!validD(date)) return fail("Выберите дату");
+  if (EARLY.mode === "part" && amount >= left - 0.5) return fail("Это весь остаток — выберите «Полностью»");
+  d.extra = [...debtExtras(d), { id: uid().slice(0, 8), date, amount, full: EARLY.mode === "full" }];
+  if (EARLY.mode === "full") d.closed = { date, amount, left: Math.round(left) };
+  save(); closeSheet(); render();
+  if (EARLY.mode === "full") { const saved = left - amount; toast(saved > 0.5 ? `Долг закрыт. Экономия ${rub(saved)}` : "Долг закрыт досрочно"); }
+  else toast(`Внесено ${rub(amount)}. Осталось ${rub(debtLeft(d))}`);
+}
+function openExtra(x) {
+  const d = x.item, e = x.extra;
+  openSheet(`<h3>${e.full ? "Досрочное закрытие" : "Досрочный платёж"}</h3>
+    <p class="muted" style="margin:-8px 0 0">${esc(d.name)} · ${PEOPLE[d.person]}</p>
+    <p style="margin:0">${dayLabel(x.date)} ${x.date.getFullYear()} внесено <b class="num">${rub(e.amount)}</b>${e.full && d.closed?.left > e.amount ? `. По графику оставалось ${rub(d.closed.left)}, экономия <b class="num" style="color:var(--mint)">${rub(d.closed.left - e.amount)}</b>` : ""}.</p>
+    <button class="btn danger full" data-act="extra-undo" data-id="${d.id}" data-eid="${e.id}">Отменить ${e.full ? "закрытие" : "этот платёж"}</button>
+    <button class="btn full" data-act="edit" data-id="${d.id}">Открыть долг</button>
+    <button class="btn full" data-act="close">Закрыть</button>`);
+}
+function undoExtra(id, eid) {
+  const d = findItem(id); if (!d) return;
+  const e = debtExtras(d).find(z => z.id === eid);
+  d.extra = debtExtras(d).filter(z => z.id !== eid);
+  if (e && e.full) delete d.closed;
+  save(); closeSheet(); render(); toast(e && e.full ? "Закрытие отменено — график восстановлен" : "Досрочный платёж отменён");
 }
 function setAmount(key, val) {
   const x = findInstance(key); if (!x) return false;
@@ -668,7 +739,7 @@ function claudeReport() {
   L.push("## Долги", "", row(["Чей", "Кредитор", "Тип", "Осталось", "Внесено в приложении как долг", "Платёж", "Когда платится", "Плавающий", "Следующий платёж", "Последний платёж"]), row(Array(10).fill("---")));
   for (const d of D.debts) {
     const nx = debtNext(d);
-    L.push(row([PEOPLE[d.person], d.name, DEBT_TYPES[d.type], rub(debtLeft(d)), rub(d.total), d.freq === "once" || d.freq === "dates" ? "—" : rub(d.payment) + (d.freq === "monthly" ? "" : " за платёж"), freqLabel(d), d.floating ? "да" : "нет",
+    L.push(row([PEOPLE[d.person], d.name, DEBT_TYPES[d.type], d.closed ? `закрыт досрочно ${parseD(d.closed.date).toLocaleDateString("ru-RU")}` : rub(debtLeft(d)), rub(d.total), d.freq === "once" || d.freq === "dates" ? "—" : rub(d.payment) + (d.freq === "monthly" ? "" : " за платёж"), freqLabel(d), d.floating ? "да" : "нет",
       nx ? `${nx.date.toLocaleDateString("ru-RU")} — ${rub(nx.amount)}` : "выплачен", debtEnd(d) ? monthTitle(debtEnd(d)) : "—"]));
   }
   L.push("", "### Графики по долгам (неоплаченные платежи)", "");
@@ -686,6 +757,8 @@ function claudeReport() {
     const m = addM(ym, k), a = monthStats(m, "all"), st = monthStats(m, "stepan"), yu = monthStats(m, "yulia");
     L.push(row([monthTitle(m), rub(a.income), rub(a.debt), rub(a.expense), rub(a.out), rubSigned(a.free), `${rub(st.out)} / ${rub(st.income)}`, `${rub(yu.out)} / ${rub(yu.income)}`]));
   }
+  const ex = D.debts.flatMap(d => debtExtras(d).map(e => `- ${parseD(e.date).toLocaleDateString("ru-RU")} — ${d.name} (${PEOPLE[d.person]}): ${rub(e.amount)}${e.full ? `, долг закрыт полностью${d.closed?.left > e.amount ? ` (по графику оставалось ${rub(d.closed.left)})` : ""}` : ", частично"}`));
+  if (ex.length) L.push("", "## Досрочные погашения", "", ...ex);
   const due = dueNow("all");
   if (due.late.length) { L.push("", "## Просроченные платежи", ""); for (const x of due.late) L.push(`- ${x.date.toLocaleDateString("ru-RU")} — ${x.item.name} (${PEOPLE[x.item.person]}): ${rub(x.amount)}`); }
   L.push("", "## Отмеченные оплаты", "");
@@ -731,6 +804,8 @@ document.addEventListener("click", e => {
   if (e.target.id === "sheet") { closeSheet(); return; }
   const seg = e.target.closest("[data-act-seg] button");
   if (seg) { readForm(); openForm(seg.dataset.kind); return; }
+  const em = e.target.closest("[data-early-mode] button");
+  if (em) { openEarly(EARLY.id, em.dataset.mode); return; }
   const mchip = e.target.closest(".chips[data-multi] button");
   if (mchip) { readForm(); const f = mchip.parentElement.dataset.multi, val = Number(mchip.dataset.v); const set = new Set(FORM.v[f] || []); set.has(val) ? set.delete(val) : set.add(val); FORM.v[f] = [...set]; drawForm(); return; }
   const chip = e.target.closest(".chips[data-field] button");
@@ -753,6 +828,9 @@ document.addEventListener("click", e => {
   else if (a === "add") openForm(el.dataset.kind || "debt");
   else if (a === "edit") openForm(null, el.dataset.id);
   else if (a === "form-save") saveForm();
+  else if (a === "early") openEarly(el.dataset.id);
+  else if (a === "early-save") saveEarly();
+  else if (a === "extra-undo") undoExtra(el.dataset.id, el.dataset.eid);
   else if (a === "row-add") { readForm(); FORM.v.rows = [...(FORM.v.rows || []), { date: "", amount: (FORM.v.rows || []).slice(-1)[0]?.amount || "" }]; drawForm(); }
   else if (a === "row-del") { readForm(); FORM.v.rows = (FORM.v.rows || []).filter((_, i) => i !== Number(el.dataset.i)); drawForm(); }
   else if (a === "form-delete") $("#del-confirm").hidden = false;
