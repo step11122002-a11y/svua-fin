@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>SVUA Fin</title>
+<meta name="description" content="Мои кредиты, платежи и зарплаты">
+<meta name="theme-color" content="#0c1413">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SVUA Fin">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="style.css?v=1">
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <h1 id="title">Сводка</h1>
+    <div class="month-switch" id="month-switch" hidden>
+      <button data-act="month-prev" aria-label="Предыдущий месяц">‹</button>
+      <span id="month-label"></span>
+      <button data-act="month-next" aria-label="Следующий месяц">›</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="view" id="view-summary"></section>
+    <section class="view" id="view-month" hidden></section>
+    <section class="view" id="view-salary" hidden></section>
+    <section class="view" id="view-list" hidden></section>
+  </main>
+
+  <button class="fab" data-act="add" aria-label="Добавить">
+    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="summary"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span>Сводка</span></button>
+    <button data-tab="month"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg><span>Месяц</span><em class="count" id="due-count" hidden></em></button>
+    <button data-tab="salary"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="13" rx="3"/><circle cx="12" cy="12.5" r="2.6"/><path d="M6 9.5h.01M18 15.5h.01"/></svg><span>Зарплаты</span></button>
+    <button data-tab="list"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg><span>Список</span></button>
+  </nav>
+
+  <div class="overlay" id="sheet" hidden>
+    <div class="sheet" role="dialog" aria-modal="true">
+      <div class="sheet-grip"></div>
+      <div class="sheet-body" id="sheet-body"></div>
+    </div>
+  </div>
+  <div class="toast" id="toast" hidden></div>
+  <input type="file" id="import-file" accept=".json,application/json" hidden>
+</div>
+<script src="app.js?v=1"></script>
+</body>
+</html>
